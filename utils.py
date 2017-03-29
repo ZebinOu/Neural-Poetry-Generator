@@ -24,7 +24,19 @@ def read_poem(filename):
             temp += [c for c in candidates if len(c) > min_poem_length]
         return temp
 
-def tokenize(poems, vocabulary_size, name):
+def read_regular_poem(filename, pattern=5):
+    template = '(^(?:(?:[\u4E00-\u9FFF]{%d,%d}，[\u4E00-\u9FFF]{%d,%d}。)+)$)' % (pattern,pattern,pattern,pattern)
+    with tf.gfile.GFile(filename, "r") as f:
+        words = f.read().decode("utf-8").split()
+        temp=[]
+        for segment in words:
+            # find all words that satisfies [[(###,)*n][###。]]*m pattern
+            candidates = re.findall(template, segment)
+            temp.extend(candidates) 
+    return temp
+
+
+def tokenize(poems, vocabulary_size):
     '''
     Map word to index.
     Arg:
@@ -43,7 +55,8 @@ def tokenize(poems, vocabulary_size, name):
     
     count = [['UNK', -1]]
     # Get the #vocabulary_size most frequent words, and set others to UNK
-    count.extend(collections.Counter(words).most_common(vocabulary_size - 1))
+    counter = collections.Counter(words)
+    count.extend(counter.most_common(vocabulary_size - 1))
 
     dictionary = dict()
     for word, _ in count:
@@ -63,8 +76,8 @@ def tokenize(poems, vocabulary_size, name):
     count[0][1] = unk_count
     reverse_dictionary = dict(zip(dictionary.values(), dictionary.keys()))
 
-    print('Data size: %d words.' % (num_words))
-
+    print('Total number of words: %d' % (num_words))
+    print('Number of different words: %d' % (len(counter)))
     return data, count, dictionary, reverse_dictionary
 
 def chop_poems(poems, maxlen, minlen):
@@ -104,7 +117,7 @@ def chop_poems(poems, maxlen, minlen):
     # shuffle and sort by length to make the data easy to feed
     random.shuffle(chopped_poems)
     chopped_poems.sort(key=(lambda s: len(s)), reverse=True)
-    
+    print('Number of poems: %d'%(len(chopped_poems)))
     return chopped_poems
 
 def word2vec_batch_feeder_setup(data, batch_size, num_skips, skip_window):
@@ -228,6 +241,8 @@ def rnnlm_batch_feeder_setup(data_sorted, batch_size):
         # Output batch: (max_sequence_length, batch_size)
         return input_batch, target_batch, sequence_length, epochs
     return batch_feeder
+
+
 
 def sentance2tokens(s, dictionary):
     return [dictionary[i] for i in s]

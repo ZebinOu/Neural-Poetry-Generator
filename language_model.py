@@ -1,36 +1,34 @@
 import tensorflow as tf
 import utils, math, time, os
 import numpy as np
-# import pickle
-import wxpy
+# import wxpy
 # Monitoring the learning process via phone
-bot = wxpy.Bot(console_qr=True)
-logger = wxpy.get_wechat_logger(receiver=bot)
-logger.warning('Successfully login')
-
+# bot = wxpy.Bot(console_qr=True)
+# logger = wxpy.get_wechat_logger(receiver=bot)
+# logger.warning('Successfully login')
 
 class RNNLM:
-
-    def __init__(self, params):
-        cells = {
-        'LSTM':lambda:tf.contrib.rnn.BasicLSTMCell(embedding_size, state_is_tuple=True),
-        'GRU':lambda:tf.contrib.rnn.GRUCell(embedding_size)
-        }
+    def __init__(self, params, data, count, dictionary, reverse_dictionary):
+        self.data = data
+        self.count = count
+        self.dictionary = dictionary
+        self.reverse_dictionary = reverse_dictionary
         self.params = params
+
+        cells = {
+        'LSTM':lambda:tf.contrib.rnn.BasicLSTMCell(params['embedding_size'], state_is_tuple=True),
+        'GRU':lambda:tf.contrib.rnn.GRUCell(params['embedding_size'])
+        }
+   
+        self.model_description = '#########Model setup###########\ncell type:\t %s\nnum_layers:\t %d\ndropout_prob: \t %f\nembed_size:\t %d\nvocab_size:\t %d\n###############################\n'%(params['rnn_cell'], params['num_layers'], params['keep_prob'], params['embedding_size'], params['vocabulary_size'])
+
+        self.training_description = '########Training options#########\nmax_grad:\t%f\nbatch_size:\t%d\nmax_steps:\t%d\nlearning_rate:\t%g\ndecay_steps:\t%d\ndecay_rate:\t%g\noptimizer:\t%s\n#################################\n'%(params['max_grad'], params['batch_size'], params['num_steps'], params['learning_rate'], params['decay_steps'], params['decay_rate'], params['optimizer_name'])
+
 
         num_layers = params['num_layers']
         rnn_cell = cells[params['rnn_cell']]
         embedding_size = params['embedding_size']
         vocabulary_size = params['vocabulary_size']
-        
-        self.model = '''#########Model setup###########              
-cell type:\t %s
-num_layers:\t %d
-dropout_prob: \t %f
-embed_size:\t %d
-vocab_size:\t %d 
-###############################
-\n''' %(params['rnn_cell'], params['num_layers'], params['keep_prob'], embedding_size, vocabulary_size)
 
         self.graph = tf.Graph()
         with self.graph.as_default():
@@ -74,16 +72,13 @@ vocab_size:\t %d
 
                 self.w = tf.Variable(tf.truncated_normal((embedding_size, vocabulary_size), stddev=1.0/math.sqrt(embedding_size)), name='softmax_w')
                 self.b = tf.Variable(tf.zeros([vocabulary_size]), name='softmax_b')
-                # tf.summary.histogram('w', self.w)
-                # tf.summary.histogram('b', self.b)
                 logits = tf.matmul(flattened_outputs, self.w) + self.b
-
-                # tf.summary.histogram('softmax_value', tf.nn.softmax(logits[5]))
                 
                 # Cross entropy between flattened_outputs and targets
                 self.loss = tf.reduce_mean(
                     tf.nn.sparse_softmax_cross_entropy_with_logits(labels=tf.reshape(self.targets, [-1]), logits=logits), name='loss')
-                tf.summary.scalar('loss', self.loss)
+                self.perplexity = tf.exp(self.loss)
+                tf.summary.scalar('perplexity', self.perplexity)
 
             # ----------------------------Evaluation----------------------------------
             # The following computation assumes the feeding data to be one dimensional
@@ -102,7 +97,6 @@ vocab_size:\t %d
 
                 # TensorArray used to store generated token
                 sample_ta = tf.TensorArray(dtype=tf.int32, size=sample_len, dynamic_size=True)
-
 
                 def loop_fn(time, cell_output, cell_state, loop_state):
                     '''## Missing docstring from tensorflow api
@@ -143,8 +137,8 @@ vocab_size:\t %d
                         next_cell_state = cell_state
                         next_loop_state = loop_state
                         def get_next_word():
-                            '''select words with top 6 logits, eliminate <UNK> and perform softmax sampling'''
-                            values, indices = tf.nn.top_k(tf.matmul(cell_output, self.w) + self.b, k=4)
+                            '''select words with top k logits, eliminate <UNK> and perform softmax sampling'''
+                            values, indices = tf.nn.top_k(tf.matmul(cell_output, self.w) + self.b, k=80)
                             nonzero = tf.where(tf.not_equal(indices, tf.zeros_like(indices)))
                             indices = tf.reshape(tf.gather_nd(indices, nonzero),(1, -1))
                             values = tf.reshape(tf.gather_nd(values, nonzero),(1, -1))
@@ -167,11 +161,20 @@ vocab_size:\t %d
                 _, _, final_sample_ta = tf.nn.raw_rnn(cell, loop_fn)
                 self.final_sample = final_sample_ta.stack(name='sampled_sequence')
 
-
             self.saver = tf.train.Saver(tf.trainable_variables())
 
+######################Training############################################3
+    def train(self, sample_interval=1000, save_interval=5000, logger=None):
+        max_grad = self.params['max_grad']
+        learning_rate = self.params['learning_rate']
+        batch_size = self.params['batch_size']
+        num_steps = self.params['num_steps']
+        sample = self.params['sample']
+        max_sample_length = self.params['max_sample_length']
+        decay_steps = self.params['decay_steps']
+        decay_rate = self.params['decay_rate']
+        optimizer_name = self.params['optimizer_name']
 
-    def train(self, max_grad, learning_rate, batch_size, num_steps, sample=None, max_sample_length=11, decay_steps=5000, decay_rate=0.5, opt='Adam'):
 
         with self.graph.as_default():
             with tf.variable_scope('Optimization'):
@@ -180,30 +183,27 @@ vocab_size:\t %d
                 gradients, _ = tf.clip_by_global_norm(tf.gradients(self.loss, tf.trainable_variables()), max_grad, name='Gradients')
                 learn_rate = tf.train.exponential_decay(learning_rate, global_step, decay_steps=decay_steps, decay_rate=decay_rate, staircase=True)
 
-                # optimizer = tf.train.GradientDescentOptimizer(learning_rate=learn_rate)
-                optimizer = tf.train.AdamOptimizer(learning_rate=learn_rate)
+                if optimizer_name == 'GradientDescent':
+                    optimizer = tf.train.GradientDescentOptimizer(learning_rate=learn_rate)
+                elif optimizer_name == 'Adam':
+                    optimizer = tf.train.AdamOptimizer(learning_rate=learn_rate)
+                else:
+                    raise Exception('"optimizer_name" does not macth either "Adam" or "GradientDescent".')
+
                 train_step = optimizer.apply_gradients(zip(gradients, tf.trainable_variables()), global_step=global_step) 
-                # gradw = tf.gradients(self.loss, [self.w])
-                # gradb = tf.gradients(self.loss, [self.b])
-                # tf.summary.histogram('gradw', gradw)
-                # tf.summary.histogram('gradb', gradb)
-                # tf.summary.scalar('w_gradw', tf.norm(gradw)/tf.norm(self.w))
-                # tf.summary.scalar('w_gradb', tf.norm(gradb)/tf.norm(self.b))
-                    # tf.summary.scalar('ratio%d'%(i), tf.norm(a)/tf.norm(b))
 
                 tf.summary.scalar('learning_rate', learn_rate)
                 summary = tf.summary.merge_all()
 
-
                 init = tf.global_variables_initializer()
-                batch_feeder = utils.rnnlm_batch_feeder_setup(data, batch_size)
+                batch_feeder = utils.rnnlm_batch_feeder_setup(self.data, batch_size)
                 # -------------------------Training--------------------------------------
                 if sample != None:
-                    s_feed = np.array(utils.sentance2tokens(sample, dictionary))
-                    s_len = np.array(10)
+                    s_feed = np.array(utils.sentance2tokens(sample, self.dictionary))
+                    s_len = np.array(max_sample_length)
 
             with tf.Session(graph=self.graph) as session:
-                # We must initialize all variables before we use them.
+                # Clear the log folder to avoid mess up tensorboard graph
                 folder = './tmp/rnnlog'
                 for the_file in os.listdir(folder):
                     file_path = os.path.join(folder, the_file)
@@ -213,6 +213,8 @@ vocab_size:\t %d
                     except Exception as e:
                         print(e)
                 summary_writer = tf.summary.FileWriter('./tmp/rnnlog', session.graph)
+
+
                 init.run()
                 start_time = time.time()
                 for step in range(num_steps):
@@ -224,18 +226,18 @@ vocab_size:\t %d
                     self.keep_prob: self.params['keep_prob']
                     }
 
-                    _, lr, loss_val = session.run([train_step, learn_rate, self.loss], feed_dict=feed_dict)
-                    if step % 1 == 0:
+                    _, lr, perplexity = session.run([train_step, learn_rate, self.perplexity], feed_dict=feed_dict)
+                    if step % 5 == 0:
                         duration = time.time() - start_time
-                        print('Epoch: %d, Step %d, lr: %g, perplexity: %g, Time: %.3f sec' % (epochs, step, lr, np.exp(loss_val), duration))
+                        print('Epoch: %d, Step %d, lr: %g, perplexity: %g, Time: %.3f sec' % (epochs, step, lr, perplexity, duration))
                         summary_str = session.run(summary, feed_dict=feed_dict)
                         summary_writer.add_summary(summary_str, step)
                         summary_writer.flush()
 
-                        if step % 5000 == 0 and step != 0:
+                        if step % save_interval == 0 and step != 0:
                             self.saver.save(session, './tmp/rnndata/model', global_step=step)
-                            pass
-                        if step % 5000 == 0:
+
+                        if step % sample_interval == 0:
                             feed_dict = {
                             self.sample_init    : s_feed, 
                             self.max_sample_len : s_len, 
@@ -243,59 +245,46 @@ vocab_size:\t %d
                             }
 
                             sam = session.run(self.final_sample, feed_dict=feed_dict)
-                            sam = utils.tokens2sentance(sam, reverse_dictionary)
-                            print('Epoch: %d, Loss: %g, \nSampled sequence: %s\n' % (epochs, loss_val, sam))
-                            logger.warning('Epoch: %d, lr: %g, loss: %.3f, \n%s' % (epochs, lr, loss_val, sam))
-                            pass
-                        if step % 1500 == 0:
-                            print('''########Training options#########
-max_grad:\t%f
-batch_size:\t%d
-max_steps:\t%d
-learning_rate:\t%g
-decay_steps:\t%d
-decay_rate:\t%g
-optimizer:\t%s
-#################################
-            '''%(max_grad, batch_size, num_steps, learning_rate, decay_steps, decay_rate, opt))
-                            print(self.model)
+                            sam = utils.tokens2sentance(sam, self.reverse_dictionary)
+                            print('Epoch: %d, Perplexity: %g, \nSampled sequence: %s\n' % (epochs, perplexity, sam))
+                            
+                            if logger:
+                                # enable wechat logger
+                                logger.warning('Epoch: %d, lr: %g, Perplexity: %.g, \n%s' % (epochs, lr, perplexity, sam))
+
                         start_time = time.time()
 
+###########################sampler############################################3
+    def sample(self, sample_len, checkpoint_dir='./tmp/rnndata/'):
+        key = self.dictionary.keys()
+        print(self.training_description)
+        print(self.model_description)
+        with tf.Session(graph=self.graph) as session:
+            path = tf.train.latest_checkpoint(checkpoint_dir)
+            self.saver.restore(session, path)
+            while True:
+                s = input('Type Chinese strings to warm up the model:\n')
+                valid = True
+                for i in s:
+                    valid = valid and (i in key)
+                if not valid:
+                    continue
+                s_feed = np.array(utils.sentance2tokens(s, self.dictionary))
+                s_len = np.array(sample_len)
+                feed_dict = {
+                self.sample_init    : s_feed, 
+                self.max_sample_len : s_len, 
+                self.keep_prob      : 1
+                }
+                sam = session.run(self.final_sample, feed_dict=feed_dict)
+                sam = utils.tokens2sentance(sam, self.reverse_dictionary)
+                print(sam)    
 
-#--------------------------rnnlm Model setup------------------------------
-
-vocabulary_size = 8000 # unique symbols in poems: 11873
-embedding_size = 1200
-
-params = {
-'embedding_size': embedding_size,
-'vocabulary_size': vocabulary_size,
-'num_layers': 4,  # num of RNN layers
-'keep_prob': 0.8, # dropout
-'rnn_cell':'LSTM', 
-}
-
-# ---------------------------Data feeding preparation---------------
-# Read and tokenize data
-data_dir = './data/'
-texts = ['qts_tab.txt', 'qsc_tab.txt', 'qtais_tab.txt','qss_tab.txt']
-# max and min length of poem sequence
-maxlen = 150
-minlen = 7
-poems = []
-for t in texts:
-    poems.extend(utils.read_poem(data_dir + t))
 
 
-poems = utils.chop_poems(poems, maxlen, minlen)
-print('Number of poems: %d'%(len(poems)))
-data, count, dictionary, reverse_dictionary = utils.tokenize(poems, vocabulary_size, 'all_poems')
-# with open('./data/temp100','wb') as file:
-#     pickle.dump([data, count, dictionary, reverse_dictionary], file)
-# with open('./data/temp','rb') as file:
-#     data, count, dictionary, reverse_dictionary = pickle.load(file)
-rnnlm = RNNLM(params)
 
-s = '苟'  
-rnnlm.train(max_grad=8.0, learning_rate=0.0001, batch_size=64, num_steps=1000000, sample=s, max_sample_length=30, decay_steps=10000, decay_rate=0.1)
+
+
+
+
 
