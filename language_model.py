@@ -7,6 +7,7 @@ import numpy as np
 # logger = wxpy.get_wechat_logger(receiver=bot)
 # logger.warning('Successfully login')
 
+
 class RNNLM:
     def __init__(self, params, data, count, dictionary, reverse_dictionary):
         self.data = data
@@ -138,10 +139,11 @@ class RNNLM:
                         next_loop_state = loop_state
                         def get_next_word():
                             '''select words with top k logits, eliminate <UNK> and perform softmax sampling'''
-                            values, indices = tf.nn.top_k(tf.matmul(cell_output, self.w) + self.b, k=80)
-                            nonzero = tf.where(tf.not_equal(indices, tf.zeros_like(indices)))
-                            indices = tf.reshape(tf.gather_nd(indices, nonzero),(1, -1))
-                            values = tf.reshape(tf.gather_nd(values, nonzero),(1, -1))
+                            values, indices = tf.nn.top_k(tf.matmul(cell_output, self.w) + self.b, k=params['sample_range'])
+                            # filter out 'UNK' token
+                            # nonzero = tf.where(tf.not_equal(indices, tf.zeros_like(indices)))
+                            # indices = tf.reshape(tf.gather_nd(indices, nonzero),(1, -1))
+                            # values = tf.reshape(tf.gather_nd(values, nonzero),(1, -1))
                             next_word = indices[0][tf.cast(tf.multinomial(values, 1), dtype=tf.int32)[0][0]]
                             return next_word
 
