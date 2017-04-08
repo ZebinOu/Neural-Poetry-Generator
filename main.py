@@ -12,7 +12,7 @@ params = {
     # Model setup
     'vocabulary_size': 8000,
     'embedding_size': 512,
-    'num_layers': 1,  # num of RNN layers
+    'num_layers': 3,  # num of RNN layers
     'keep_prob': 0.5, # dropout
     'rnn_cell':'LSTM',
 
@@ -48,5 +48,5 @@ data, count, dictionary, reverse_dictionary = utils.tokenize(poems, params['voca
 
 
 rnnlm = language_model.RNNLM(params, data, count, dictionary, reverse_dictionary)
-# rnnlm.train(sample_interval=100, save_interval=5000, logger=None)
-rnnlm.sample(sample_len=100, checkpoint_dir='./tmp/rnndata/')
+rnnlm.train(sample_interval=100, save_interval=5000, logger=None)
+# rnnlm.sample(sample_len=100, checkpoint_dir='./tmp/rnndata/')

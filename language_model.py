@@ -8,6 +8,32 @@ import numpy as np
 # logger.warning('Successfully login')
 
 
+class SkipConnectedMultiRNNCell(tf.contrib.rnn.MultiRNNCell):
+  # concatenate cell output with input embedding to preserve input information in higher layer
+  def __call__(self, inputs, state, scope=None):
+    """Run this multi-layer cell on inputs, starting from state."""
+    with tf.variable_scope(scope or "multi_rnn_cell"):
+      cur_state_pos = 0
+      cur_inp = inputs
+      new_states = []
+      for i, cell in enumerate(self._cells):
+        with tf.variable_scope("cell_%d" % i):
+          if self._state_is_tuple:
+            cur_state = state[i]
+          else:
+            cur_state = tf.slice(
+                state, [0, cur_state_pos], [-1, cell.state_size])
+            cur_state_pos += cell.state_size
+          if i != 0:
+              # input is (?, embedding_size)
+              cur_inp = tf.concat([cur_inp, inputs], 1)
+          cur_inp, new_state = cell(cur_inp, cur_state)
+          new_states.append(new_state)
+    new_states = (tuple(new_states) if self._state_is_tuple else
+                  tf.concat(new_states, 1))
+    return cur_inp, new_states
+
+
 class RNNLM:
     def __init__(self, params, data, count, dictionary, reverse_dictionary):
         self.data = data
@@ -28,6 +54,7 @@ class RNNLM:
 
         num_layers = params['num_layers']
         rnn_cell = cells[params['rnn_cell']]
+
         embedding_size = params['embedding_size']
         vocabulary_size = params['vocabulary_size']
 
@@ -52,16 +79,16 @@ class RNNLM:
 
             # Build multilayer cell
             with tf.variable_scope('RNN_Cell', reuse=True):
-                cell = tf.contrib.rnn.MultiRNNCell([unit_cell() for _ in range(num_layers)], state_is_tuple=True)
+                # cell = tf.contrib.rnn.MultiRNNCell([unit_cell() for _ in range(num_layers)], state_is_tuple=True)
+                cell = SkipConnectedMultiRNNCell([unit_cell() for _ in range(num_layers)], state_is_tuple=True)
     
             # ----------------------------Loss-----------------------------
             with tf.variable_scope('Loss'):
                 # embed - (max_sequence_len, batch_size, embedding_size)
                 embed = tf.nn.embedding_lookup(self.embeddings, self.inputs)
-                
+                self.test = embed
                 # Dropout when training
                 embed = tf.nn.dropout(embed, self.keep_prob)
-
                 initial_state = cell.zero_state(tf.shape(self.inputs)[1], tf.float32)
 
                 outputs, next_state = tf.nn.dynamic_rnn(cell, embed, time_major=True, initial_state=initial_state, sequence_length=self.sequence_len)
